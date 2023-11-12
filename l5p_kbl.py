@@ -5,7 +5,7 @@
 # Shara, 2021, MIT
 #
 # Add udev rule as "/etc/udev/rules.d/10-kblight.rules" if you want control light as user
-# SUBSYSTEM=="usb", ATTR{idVendor}=="048d", ATTR{idProduct}=="c965", MODE="0666"
+# SUBSYSTEM=="usb", ATTR{idVendor}=="048d", ATTR{idProduct}=="c975", MODE="0666"
 #
 # Payload description
 #
@@ -44,20 +44,39 @@
 # UNUSED ........... 00
 #
 
-import re
-
+import argparse
+import functools
 import usb.core
+
+# Knoen keyboard light devices.
+# Integrated Technology Express, Inc. ITE Device(8295)
+_KNOWN_DEVICES = [
+    (0x048D, 0xC985, 0xFF89, 0x00CC),  # 2023
+    (0x048D, 0xC984, 0xFF89, 0x00CC),  # 2023
+    (0x048D, 0xC983, 0xFF89, 0x00CC),  # 2023 LOQ
+    (0x048D, 0xC975, 0xFF89, 0x00CC),  # 2022 (16ARH7H)
+    (0x048D, 0xC973, 0xFF89, 0x00CC),  # 2022 Ideapad
+    (0x048D, 0xC965, 0xFF89, 0x00CC),  # 2021
+    (0x048D, 0xC963, 0xFF89, 0x00CC),  # 2021 Ideapad
+    (0x048D, 0xC955, 0xFF89, 0x00CC),  # 2020
+]
+
+
+@functools.lru_cache
+def _get_device() -> usb.core.Device:
+    for vendor, product, _, _ in _KNOWN_DEVICES:
+        device = usb.core.find(idVendor=vendor, idProduct=product)
+        if device is not None:
+            assert isinstance(device, usb.core.Device)
+            return device
+    raise RuntimeError("No valid devices found.")
 
 
 class LedController:
-    # Keyboard light device
-    # Integrated Technology Express, Inc. ITE Device(8295)
-    VENDOR = 0x048D
-    PRODUCT = 0xC965
     EFFECT = {"static": 1, "breath": 3, "wave": 4, "hue": 6}
 
     def __init__(self):
-        device = usb.core.find(idVendor=self.VENDOR, idProduct=self.PRODUCT)
+        device = _get_device()
 
         if device is None:
             raise ValueError("Light device not found")
@@ -72,7 +91,7 @@ class LedController:
     def build_control_string(
         self,
         effect,
-        colors=None,
+        hex_colors: list[str] | None,
         speed=1,
         brightness=1,
         wave_direction=None,
@@ -88,59 +107,17 @@ class LedController:
         data.append(speed)
         data.append(brightness)
 
-        if effect not in ["static", "breath"]:
-            data += [0] * 12
-        else:
-            chunk = None
-            for section in range(0, 4):
-
-                if section < len(colors):
-                    color = colors[section].lower()
-
-                    model = None
-                    # Detect color model
-                    if re.match(r"^[0-9a-f]{6}$", color):
-                        # HEX model
-                        chunk = [
-                            int(color[i : i + 2], 16) for i in range(0, len(color), 2)
-                        ]
-                    else:
-                        components = color.split(",")
-
-                        if components[0].isdigit():
-                            # RGB model
-                            components = list(map(lambda c: int(c), components))
-
-                            # Validate RGB input
-                            for component in components:
-                                if not 0 <= component <= 255:
-                                    raise ValueError(
-                                        f"Invalid RGB color model: {color}"
-                                    )
-
-                            chunk = list(components)
-
-                        elif re.match(r"^\d+\.\d+$", components[0]):
-                            # HSV model
-                            components = list(map(lambda c: float(c), components))
-
-                            # Validate HSV input
-                            for component in components:
-                                if not 0 <= component <= 1:
-                                    raise ValueError(
-                                        f"Invalid HSV color model: {color}"
-                                    )
-
-                            from colorsys import hsv_to_rgb
-
-                            chunk = list(
-                                map(lambda c: int(c * 255), hsv_to_rgb(*components))
-                            )
-
-                        else:
-                            raise ValueError(f"Invalid color model: {color}")
-
-                data += chunk
+        data += [0] * 12
+        if effect in ["static", "breath"] and hex_colors is not None:
+            assert isinstance(hex_colors, list)
+            for section_index in range(4):
+                color = hex_colors[section_index % len(hex_colors)]
+                # HEX model.
+                section_rgb = [
+                    int(color[i : i + 2], 16) for i in range(0, len(color), 2)
+                ]
+                data_index = 5 + section_index * 3
+                data[data_index : data_index + 3] = section_rgb
 
         # Unused
         data += [0]
@@ -156,6 +133,7 @@ class LedController:
         # Unused
         data += [0] * 13
 
+        print("Payload: " + " ".join(f"{x:02X}" for x in data))
         return data
 
     # Send command to device
@@ -169,10 +147,7 @@ class LedController:
         )
 
 
-# CLI Stuff
-if __name__ == "__main__":
-    import argparse
-
+def main():
     # Parse arguments
     argparser = argparse.ArgumentParser(
         description="Lenovo Legion 5 Pro 2021 keyboard light controller"
@@ -192,7 +167,11 @@ if __name__ == "__main__":
 
     # Options for custom color settings only
     custom_parser = argparse.ArgumentParser(add_help=False)
-    custom_parser.add_argument("colors", nargs="+", help="Colors of sections")
+    custom_parser.add_argument(
+        "colors",
+        nargs="+",
+        help="Hexadecimal colors, upto 4 for each of the 4 sections.",
+    )
 
     # Options for wave effect
     wave_parser = argparse.ArgumentParser(add_help=False)
@@ -240,9 +219,13 @@ if __name__ == "__main__":
     controller = LedController()
     data = controller.build_control_string(
         effect=args.effect,
-        colors=getattr(args, "colors", None),
+        hex_colors=getattr(args, "colors", None),
         speed=getattr(args, "speed", 1),
         brightness=getattr(args, "brightness", 1),
         wave_direction=getattr(args, "direction", None),
     )
     controller.send_control_string(data)
+
+
+if __name__ == "__main__":
+    main()
