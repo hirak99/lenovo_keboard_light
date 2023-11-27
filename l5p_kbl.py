@@ -68,6 +68,7 @@ def _get_device() -> usb.core.Device:
         device = usb.core.find(idVendor=vendor, idProduct=product)
         if device is not None:
             assert isinstance(device, usb.core.Device)
+            print(f"Found device: {vendor:04x}:{product:04x}")
             return device
     raise RuntimeError("No valid devices found.")
 
